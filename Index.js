@@ -1,90 +1,156 @@
-const {
-    default: makeWASocket,
-    DisconnectReason,
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion
-} = require("@whiskeysockets/baileys");
-const { Boom } = require("@hapi/boom");
-const qrcode = require("qrcode-terminal");
-const pino = require("pino"); // Un logger más avanzado
-const moment = require("moment");
-const fs = require("fs");
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const qrcode = require('qrcode-terminal');
+const chalk = require('chalk');
+const figlet = require('figlet');
+const fs = require('fs');
+const path = require('path');
+const { Boom } = require('@hapi/boom');
+const ytdl = require('ytdl-core');
+const ffmpegPath = require('ffmpeg-static');
+const ffmpeg = require('fluent-ffmpeg');
 
-// Carpeta para guardar la información de la sesión
-const SESSION_FOLDER = "auth_info_baileys";
-// Carpeta para guardar los logs
-const LOGS_FOLDER = "logs";
+// --- Configuración de FFmpeg ---
+ffmpeg.setFfmpegPath(ffmpegPath);
 
-async function startBot() {
-    // Obtiene la última versión de Baileys
-    const { version } = await fetchLatestBaileysVersion();
-    console.log(`✅ Usando la versión de Baileys: ${version.join(".")}`);
+// --- Configuraciones ---
+const SESSION_PATH = path.join(__dirname, 'session');
+const LOGS_PATH = path.join(__dirname, 'logs');
+const BROWSER_INFO = ["Music-Bot", "Chrome", "1.0"];
+const RECONNECT_DELAY = 5000; // 5 segundos
 
-    // Carga o crea las credenciales de la sesión
-    const { state, saveCreds } = await useMultiFileAuthState(SESSION_FOLDER);
+// --- Funciones de Utilidad ---
+function log(message, level = 'info') {
+    const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
+    console.log(logMessage);
 
-    const sock = makeWASocket({
-        version,
-        logger: pino({ level: "silent" }), // Silencia el logger interno de Baileys
-        auth: state,
-        browser: ["Tu Bot Mejorado", "Chrome", "1.0"] // Un nombre personalizado para tu bot
-    });
-
-    // Evento que se ejecuta al actualizar las credenciales (sesión)
-    sock.ev.on("creds.update", saveCreds);
-
-    // Evento que se ejecuta al cambiar el estado de la conexión
-    sock.ev.on("connection.update", (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            console.log("📲 Escanea este QR con tu teléfono:");
-            qrcode.generate(qr, { small: true });
-        }
-
-        if (connection === "open") {
-            console.log("✅ Conectado a WhatsApp Web correctamente.");
-        } else if (connection === "close") {
-            const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            if (reason === DisconnectReason.loggedOut) {
-                console.log("❌ Sesión cerrada, borra la carpeta 'auth_info_baileys' para volver a iniciar.");
-                fs.rmSync(SESSION_FOLDER, { recursive: true, force: true });
-            } else {
-                console.log("⚠️ Conexión cerrada. Reintentando en 5 segundos...");
-                setTimeout(() => startBot(), 5000);
-            }
-        }
-    });
-
-    // Evento que se ejecuta al recibir un mensaje
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message) return;
-
-        // Extrae el mensaje de texto
-        const from = msg.key.remoteJid;
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-        const time = moment().format("YYYY-MM-DD HH:mm:ss");
-
-        // Crea la carpeta de logs si no existe
-        if (!fs.existsSync(LOGS_FOLDER)) {
-            fs.mkdirSync(LOGS_FOLDER);
-        }
-        
-        // Guarda el log en un archivo
-        const logFile = `${LOGS_FOLDER}/whatsapp.log`;
-        const logLine = `[${time}] ${from} -> ${text}\n`;
-        fs.appendFileSync(logFile, logLine);
-        
-        // Aquí puedes agregar la lógica de tu bot
-        // Ejemplo de respuesta simple:
-        if (text.toLowerCase().includes("hola")) {
-            await sock.sendMessage(from, { text: "¡Hola! ¿En qué puedo ayudarte?" });
-        }
-    });
-
-    return sock;
+    if (!fs.existsSync(LOGS_PATH)) {
+        fs.mkdirSync(LOGS_PATH);
+    }
+    const logFile = path.join(LOGS_PATH, 'bot.log');
+    fs.appendFileSync(logFile, logMessage + '\n');
 }
 
-// Inicia el bot
+function showBanner() {
+    console.log(chalk.red(figlet.textSync('MusicBot', { horizontalLayout: 'full' })));
+    console.log(chalk.bold.green('¡Music-Bot está iniciando! ¡Listo para la fiesta!'));
+    console.log(chalk.bold.blue('--------------------------------------------------'));
+}
+
+// --- Lógica del Bot ---
+async function handlePlayCommand(sock, message, query) {
+    if (!query) {
+        await sock.sendMessage(message.key.remoteJid, { text: 'Por favor, dime qué canción quieres reproducir. Ejemplo: !play Despacito' });
+        return;
+    }
+    
+    log(`Buscando y descargando: "${query}"...`, 'info');
+    await sock.sendMessage(message.key.remoteJid, { text: `Buscando y descargando la canción: *${query}*` });
+    
+    try {
+        const videoInfo = await ytdl.getInfo(query, {
+            filter: 'audioonly'
+        });
+
+        const audioStream = ytdl(videoInfo.videoDetails.videoId, {
+            quality: 'highestaudio',
+            filter: 'audioonly'
+        });
+
+        const outputFilePath = path.join(__dirname, 'temp', `${videoInfo.videoDetails.title}.mp3`);
+        
+        // Crea la carpeta temporal si no existe
+        if (!fs.existsSync(path.join(__dirname, 'temp'))) {
+            fs.mkdirSync(path.join(__dirname, 'temp'));
+        }
+
+        // Convierte el stream a un archivo MP3
+        ffmpeg(audioStream)
+            .audioBitrate(128)
+            .save(outputFilePath)
+            .on('end', async () => {
+                log(`Descarga y conversión completada: ${outputFilePath}`, 'success');
+                await sock.sendMessage(message.key.remoteJid, {
+                    audio: fs.readFileSync(outputFilePath),
+                    mimetype: 'audio/mp4'
+                }, {
+                    url: outputFilePath
+                });
+                
+                // Borra el archivo temporal
+                fs.unlinkSync(outputFilePath);
+            })
+            .on('error', (err) => {
+                log(`Error al convertir el audio: ${err.message}`, 'error');
+                sock.sendMessage(message.key.remoteJid, { text: '¡Ups! Ocurrió un error al procesar tu canción.' });
+            });
+
+    } catch (error) {
+        log(`Error al buscar la canción: ${error.message}`, 'error');
+        await sock.sendMessage(message.key.remoteJid, { text: 'No pude encontrar esa canción. Asegúrate de que el enlace de YouTube sea válido.' });
+    }
+}
+
+// --- Inicio del Bot ---
+async function startBot() {
+    showBanner();
+
+    try {
+        const { version } = await fetchLatestBaileysVersion();
+        log(`Usando la versión de Baileys: ${version.join('.')}`);
+
+        const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
+
+        const sock = makeWASocket({
+            version,
+            auth: state,
+            browser: BROWERS_INFO,
+            logger: pino({ level: 'silent' })
+        });
+        
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                log('📲 Escanea este código QR con tu teléfono:', 'info');
+                qrcode.generate(qr, { small: true });
+            }
+
+            if (connection === 'open') {
+                log('✅ ¡Conectado a WhatsApp Web!', 'success');
+            } else if (connection === 'close') {
+                const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+                if (reason === DisconnectReason.loggedOut) {
+                    log('❌ Sesión cerrada. Borra la carpeta de sesión para volver a iniciar.', 'error');
+                    fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+                } else {
+                    log(`⚠️ Conexión cerrada (${reason}). Reintentando en ${RECONNECT_DELAY / 1000}s...`, 'warning');
+                    setTimeout(() => startBot(), RECONNECT_DELAY);
+                }
+            }
+        });
+
+        sock.ev.on('messages.upsert', async ({ messages }) => {
+            const msg = messages[0];
+            if (!msg.message) return;
+
+            const from = msg.key.remoteJid;
+            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+            
+            log(`Mensaje de ${from}: ${text}`, 'message');
+
+            if (text.startsWith('!play')) {
+                const query = text.replace('!play', '').trim();
+                await handlePlayCommand(sock, msg, query);
+            }
+        });
+
+    } catch (error) {
+        log(`Error al iniciar el bot: ${error.message}`, 'error');
+    }
+}
+
 startBot();
