@@ -20,13 +20,19 @@ async function connectBot() {
       version,
       logger: Pino({ level: "silent" }),
       auth: state,
-      printQRInTerminal: method === "qr"
+      // Se eliminó printQRInTerminal porque ya está obsoleto
     })
 
     sock.ev.on("creds.update", saveCreds)
 
     sock.ev.on("connection.update", async (update) => {
-      const { connection } = update
+      const { connection, qr } = update
+
+      // ⚠️ Manejar el QR manualmente
+      if (qr) {
+        console.log("Escanea este código QR para iniciar sesión:")
+        console.log(qr)
+      }
 
       if (connection === "open") {
         console.log("✅ Conectado correctamente.")
