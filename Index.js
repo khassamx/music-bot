@@ -1,74 +1,52 @@
-const { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, delay } = require("@whiskeysockets/baileys")
-const Pino = require("pino")
-const fs = require("fs")
-const moment = require("moment")
-const qrcode = require("qrcode-terminal")
+const {
+    default: makeWASocket,
+    DisconnectReason,
+    useMultiFileAuthState
+} = require('@whiskeysockets/baileys');
+const {
+    Boom
+} = require('@hapi/boom');
+const qrcode = require('qrcode-terminal');
+const fs = require('fs');
 
-async function connectBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info")
-  const { version } = await fetchLatestBaileysVersion()
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  })
-
-  rl.question("¿Cómo querés iniciar sesión? (qr / code): ", async (method) => {
-    rl.close()
+async function connectToWhatsApp() {
+    const {
+        state,
+        saveCreds
+    } = await useMultiFileAuthState('auth_info_baileys');
 
     const sock = makeWASocket({
-      version,
-      logger: Pino({ level: "silent" }),
-      auth: state
-      // Se eliminó printQRInTerminal porque ya está obsoleto
-    })
+        auth: state
+    });
 
-    sock.ev.on("creds.update", saveCreds)
+    sock.ev.on('connection.update', (update) => {
+        const {
+            connection,
+            lastDisconnect,
+            qr
+        } = update;
 
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update
-
-      // ⚠️ Manejar el QR manualmente
-      if (qr) {
-        console.log("Escanea este código QR para iniciar sesión:")
-        qrcode.generate(qr, { small: true })
-      }
-
-      if (connection === "open") {
-        console.log("✅ Conectado correctamente.")
-
-      } else if (connection === "close") {
-        const reason = lastDisconnect?.error?.output?.statusCode
-        if (reason === DisconnectReason.loggedOut) {
-          console.log("❌ Sesión cerrada, borra auth_info y volvé a intentar.")
+        if (connection === 'close') {
+            const shouldReconnect = new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Conexión cerrada. Reintentando:', shouldReconnect);
+            if (shouldReconnect) {
+                connectToWhatsApp();
+            }
+        } else if (connection === 'open') {
+            console.log('Conexión abierta con éxito.');
         }
-      }
 
-      if (method === "code" && !sock.authState.creds.registered && connection === "connecting") {
-        try {
-          const code = await sock.requestPairingCode("595981234567")
-          console.log("👉 Tu código de 8 dígitos es:", code)
-          console.log("Usalo en WhatsApp: Dispositivos vinculados > Vincular con código")
-        } catch (err) {
-          console.error("⚠️ Error al generar código:", err.message)
+        if (qr) {
+            qrcode.generate(qr, {
+                small: true
+            });
+            console.log('Escanea el QR para iniciar sesión.');
         }
-      }
-    })
+    });
 
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-      const msg = messages[0]
-      if (!msg.message) return
+    sock.ev.on('creds.update', saveCreds);
 
-      const from = msg.key.remoteJid
-      const text = msg.message.conversation || msg.message.extendedTextMessage?.text
-      const time = moment().format("YYYY-MM-DD HH:mm:ss")
-
-      const logLine = `[${time}] ${from} -> ${text}\n`
-      fs.appendFileSync("./logs/whatsapp.log", logLine)
-
-      require("./handler")(sock, msg, text)
-    })
-  })
+    return sock;
 }
 
-connectBot()
+connectToWhatsApp();
